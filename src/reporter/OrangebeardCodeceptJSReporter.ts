@@ -26,7 +26,6 @@ type ReporterConfiguration = {
 type ActiveItem = {
   tempId: UUID;
   name: string;
-  attributes?: any[];
 };
 
 /**
@@ -197,9 +196,7 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
         testRunUUID: this.testRun!,
         parentSuiteUUID: this.getCurrentSuiteId(),
         suiteNames: [cleanTitle || suite.title],
-        attributes: attributes.length ? attributes : undefined,
       } as any);
-      this.activeSuites.push({ tempId: newSuite[0], name: cleanTitle || suite.title, attributes });
       this.activeSuites.push({ tempId: newSuite[0], name: cleanTitle || suite.title });
     });
 
@@ -305,11 +302,6 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
       : null;
   }
 
-  private getCurrentSuiteAttributes(): any[] {
-    return this.activeSuites.length
-      ? this.activeSuites[this.activeSuites.length - 1].attributes ?? []
-      : [];
-  }
 
   private getCurrentTestId(): UUID | null {
     return this.activeTests.length
@@ -326,7 +318,6 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
     const data = this.extractData(test);
     const titleWithoutData = this.stripDataFromTitle(test?.title);
     const { cleanTitle, attributes } = mergeAttributesFromEntityAndTitle({ ...test, title: titleWithoutData });
-    const suiteAttributes = this.getCurrentSuiteAttributes();
 
     const baseKey = cleanTitle || titleWithoutData || test?.title || '';
     let iterationSuffix = '';
@@ -343,7 +334,7 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
       testName: finalTitle,
       testType: type,
       startTime: getTime(),
-      attributes: [...suiteAttributes, ...attributes].length > 0 ? [...suiteAttributes, ...attributes] : undefined,
+      attributes: attributes.length > 0 ? attributes : undefined,
     } as any);
     this.activeTests.push({ tempId: newTest, name: finalTitle });
     this.indexTestId({ ...test, title: finalTitle }, newTest, [test?.title, titleWithoutData, finalTitle]);
