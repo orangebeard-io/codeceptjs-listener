@@ -8,7 +8,7 @@ import type { Attachment } from '@orangebeard-io/javascript-client/dist/client/m
 
 import { level, status, testEntity } from '../constants';
 import { getBytes, getOrangebeardConfig, getStartTestRun, getTime, getTimeFromMs } from '../utils';
-import { buildErrorLogs } from './logging';
+import { buildErrorLogs, formatAsMarkdownJson } from './logging';
 import { getTestAttributes, mergeAttributesFromEntityAndTitle, mergeSuiteAttributesFromTitle } from './tags';
 
 // Resolve CodeceptJS modules relative to the consuming project (cwd), so it works when this
@@ -26,6 +26,7 @@ type ReporterConfiguration = {
 type ActiveItem = {
   tempId: UUID;
   name: string;
+  attributes?: any[];
 };
 
 /**
@@ -49,6 +50,11 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
   private testIdMap: Map<string, UUID> = new Map();
   private uploadedAttachments: Set<string> = new Set();
   private finishedTests: Set<UUID> = new Set();
+  private stepsReported: Set<UUID> = new Set();
+  private stepMap: Map<any, UUID> = new Map();
+  private readonly realtimeSteps = true;
+  private readonly logDataAsMarkdown = true;
+  private iterationCounter: Map<string, number> = new Map();
 
   constructor(runner: Mocha.Runner, configuration: ReporterConfiguration) {
     super(runner, configuration as any);
@@ -89,12 +95,63 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
         }
       }
     });
+    // Real-time step reporting
+    codeceptEvent.dispatcher.on(codeceptEvent.step.started, (step: any) => {
+      if (!this.realtimeSteps) return;
+      const testId = this.getCurrentTestId() ?? this.resolveTestId(step?.test ?? step?.context?.test);
+      if (!testId) return;
+      const startTime = this.resolveStepTime(step.startTime) ?? getTime();
+      const obStep = this.client.startStep({
+        testRunUUID: this.testRun!,
+        testUUID: testId,
+        stepName: this.getStepName(step),
+        startTime,
+      } as any);
+      this.stepMap.set(step, obStep);
+    });
+
+    codeceptEvent.dispatcher.on(codeceptEvent.step.passed, (step: any) => {
+      if (!this.realtimeSteps) return;
+      const obStep = this.stepMap.get(step);
+      const testId = this.getCurrentTestId() ?? this.resolveTestId(step?.test ?? step?.context?.test);
+      if (!obStep || !testId) return;
+      this.client.finishStep(obStep, {
+        testRunUUID: this.testRun!,
+        status: status.PASSED,
+        endTime: this.resolveStepTime(step.endTime) ?? getTime(),
+      } as any);
+      this.stepMap.delete(step);
+    });
+
+    codeceptEvent.dispatcher.on(codeceptEvent.step.failed, (step: any) => {
+      if (!this.realtimeSteps) return;
+      const obStep = this.stepMap.get(step);
+      const testId = this.getCurrentTestId() ?? this.resolveTestId(step?.test ?? step?.context?.test);
+      if (testId && obStep) {
+        const endTime = this.resolveStepTime(step.endTime) ?? getTime();
+        const errorObj = step.err ?? step.error;
+        if (errorObj) {
+          for (const entry of buildErrorLogs(errorObj)) {
+            this.logMessage(testId, entry.message, entry.level, obStep, entry.logFormat);
+          }
+        }
+        // If no errorObj, do not log a placeholder to avoid "[Error] undefined"
+        this.client.finishStep(obStep, {
+          testRunUUID: this.testRun!,
+          status: status.FAILED,
+          endTime,
+        } as any);
+        this.stepMap.delete(step);
+      }
+    });
 
     codeceptEvent.dispatcher.on(codeceptEvent.test.after, (test: any) => {
-      const paths: string[] = [];
+      const paths = new Set<string>();
 
       const collect = (p?: string) => {
-        if (typeof p === 'string' && p.toLowerCase().endsWith('.png')) paths.push(p);
+        if (typeof p === 'string' && p.toLowerCase().endsWith('.png')) {
+          paths.add(this.normalizePathKey(p));
+        }
       };
 
       if (test?.artifacts) {
@@ -118,6 +175,8 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
     // ── EVENT_RUN_BEGIN ────────────────────────────────────────────────
     runner.on(Mocha.Runner.constants.EVENT_RUN_BEGIN, () => {
       this.finishedTests.clear();
+      this.stepsReported.clear();
+      this.stepMap.clear();
       this.testRun = this.client.startTestRun(
         getStartTestRun({
           testset: testset!,
@@ -140,7 +199,7 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
         suiteNames: [cleanTitle || suite.title],
         attributes: attributes.length ? attributes : undefined,
       } as any);
-
+      this.activeSuites.push({ tempId: newSuite[0], name: cleanTitle || suite.title, attributes });
       this.activeSuites.push({ tempId: newSuite[0], name: cleanTitle || suite.title });
     });
 
@@ -158,7 +217,10 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
     // ── EVENT_TEST_PASS ──────────────────────────────────────────────
     runner.on(Mocha.Runner.constants.EVENT_TEST_PASS, (test: Mocha.Test) => {
       const testId = this.getCurrentTestId();
-      if (testId) this.reportSteps(test, testId);
+      if (testId) {
+        this.reportSteps(test, testId);
+        this.stepsReported.add(testId);
+      }
       this.finishTestItem(test, false);
     });
 
@@ -166,11 +228,17 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
     runner.on(Mocha.Runner.constants.EVENT_TEST_FAIL, (test: Mocha.Test, err: any) => {
       this.track(
         (async () => {
-          // If no current test exists, a hook (BeforeSuite) may have failed before any test started.
-          const testId = this.getCurrentTestId() ?? this.resolveTestId(test);
+          // Ensure we have a test to attach failure to.
+          let testId = this.getCurrentTestId() ?? this.resolveTestId(test);
+          if (!testId) {
+            testId = (this.startTest(test, testEntity.TEST) ?? null) as UUID | null;
+          }
 
           // 1. Report CodeceptJS steps
-          if (testId) this.reportSteps(test, testId);
+          if (testId && !this.stepsReported.has(testId)) {
+            this.reportSteps(test, testId);
+            this.stepsReported.add(testId);
+          }
 
           // 2. Report error logs
           if (testId) {
@@ -179,13 +247,29 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
             }
           }
 
-          // 3. Attach screenshot (async – the file may still be written by screenshotOnFail)
-          if (testId) await this.reportScreenshot(test);
-
-          // 4. Finish test
-          if (testId) this.finishTestItem(test, false, status.FAILED);
+          // 3. Finish test (screenshots handled in test.after)
+          if (testId) this.finishTestItem(test, false, status.FAILED, testId);
         })(),
       );
+    });
+
+    // Fallback: ensure any test ends with the correct status if not already finished.
+    runner.on(Mocha.Runner.constants.EVENT_TEST_END, (test: Mocha.Test) => {
+      const stackId = this.getCurrentTestId();
+      const testId = stackId ?? this.resolveTestId(test);
+      if (!testId || this.finishedTests.has(testId)) return;
+      if (!this.stepsReported.has(testId)) {
+        this.reportSteps(test, testId);
+        this.stepsReported.add(testId);
+      }
+      const finalStatus =
+        test.state === 'failed' || test.err ? status.FAILED : test.pending ? status.SKIPPED : status.PASSED;
+      this.finishTestItem(test, test.pending, finalStatus, testId);
+
+      // pop the stack if it matches current
+      if (stackId && this.activeTests.length && this.activeTests[this.activeTests.length - 1].tempId === stackId) {
+        this.activeTests.pop();
+      }
     });
 
     // ── EVENT_TEST_PENDING ───────────────────────────────────────────
@@ -197,43 +281,6 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
       this.finishTestItem(test, true);
     });
 
-    // ── EVENT_HOOK_BEGIN ─────────────────────────────────────────────
-    // Only *suite-level* hooks (BeforeSuite / AfterSuite) are reported as
-    // separate BEFORE / AFTER test items.  Per-test hooks (Before / After)
-    // are part of the normal test execution flow.
-    runner.on(Mocha.Runner.constants.EVENT_HOOK_BEGIN, (hook: any) => {
-      const hookName: string = hook.hookName ?? hook.title ?? '';
-
-      if (hookName.includes('before all') || hookName.includes('"before all"')) {
-        this.startTest(hook, testEntity.BEFORE);
-      } else if (hookName.includes('after all') || hookName.includes('"after all"')) {
-        this.startTest(hook, testEntity.AFTER);
-      }
-    });
-
-    // ── EVENT_HOOK_END ───────────────────────────────────────────────
-    runner.on(Mocha.Runner.constants.EVENT_HOOK_END, (hook: any) => {
-      const hookName: string = hook.hookName ?? hook.title ?? '';
-
-      const isSuiteHook =
-        hookName.includes('before all') ||
-        hookName.includes('"before all"') ||
-        hookName.includes('after all') ||
-        hookName.includes('"after all"');
-
-      if (!isSuiteHook) return;
-
-      if (hook.state === 'failed' || hook.err) {
-        const testId = this.getCurrentTestId();
-        if (testId) {
-          for (const entry of buildErrorLogs(hook.err)) {
-            this.logMessage(testId, entry.message, entry.level, null, entry.logFormat);
-          }
-        }
-      }
-
-      this.finishTestItem(hook);
-    });
 
     // ── EVENT_RUN_END ────────────────────────────────────────────────
     runner.on(Mocha.Runner.constants.EVENT_RUN_END, async () => {
@@ -258,6 +305,12 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
       : null;
   }
 
+  private getCurrentSuiteAttributes(): any[] {
+    return this.activeSuites.length
+      ? this.activeSuites[this.activeSuites.length - 1].attributes ?? []
+      : [];
+  }
+
   private getCurrentTestId(): UUID | null {
     return this.activeTests.length
       ? this.activeTests[this.activeTests.length - 1].tempId
@@ -270,26 +323,47 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
     if (this.disabled) return undefined;
     const parent = this.getCurrentSuiteId();
     if (!parent) return undefined;
-    const { cleanTitle, attributes } = mergeAttributesFromEntityAndTitle(test);
+    const data = this.extractData(test);
+    const titleWithoutData = this.stripDataFromTitle(test?.title);
+    const { cleanTitle, attributes } = mergeAttributesFromEntityAndTitle({ ...test, title: titleWithoutData });
+    const suiteAttributes = this.getCurrentSuiteAttributes();
+
+    const baseKey = cleanTitle || titleWithoutData || test?.title || '';
+    let iterationSuffix = '';
+    if (data) {
+      const next = (this.iterationCounter.get(baseKey) ?? 0) + 1;
+      this.iterationCounter.set(baseKey, next);
+      iterationSuffix = ` #${next}`;
+    }
+    const finalTitle = `${cleanTitle}${iterationSuffix}`;
 
     const newTest = this.client.startTest({
       testRunUUID: this.testRun!,
       suiteUUID: parent,
-      testName: cleanTitle,
+      testName: finalTitle,
       testType: type,
       startTime: getTime(),
-      attributes: attributes.length > 0 ? attributes : undefined,
+      attributes: [...suiteAttributes, ...attributes].length > 0 ? [...suiteAttributes, ...attributes] : undefined,
     } as any);
-    this.activeTests.push({ tempId: newTest, name: cleanTitle });
-    this.indexTestId({ ...test, title: cleanTitle }, newTest);
+    this.activeTests.push({ tempId: newTest, name: finalTitle });
+    this.indexTestId({ ...test, title: finalTitle }, newTest, [test?.title, titleWithoutData, finalTitle]);
+
+    if (this.logDataAsMarkdown && data && typeof data === 'object') {
+      const msg = `**Data**\n\n${formatAsMarkdownJson(data)}`;
+      this.logMessage(newTest, msg, level.INFO, null, 'MARKDOWN');
+    }
     return newTest;
   }
 
-  private finishTestItem(test: any, skipped = false, forcedStatus?: string): void {
+  private finishTestItem(test: any, skipped = false, forcedStatus?: string, explicitTestId?: UUID | null): void {
     if (this.disabled) return;
-    const testId = this.getCurrentTestId() ?? this.resolveTestId(test);
+    const testId = explicitTestId ?? this.getCurrentTestId() ?? this.resolveTestId(test);
     if (!testId) return;
     if (this.finishedTests.has(testId)) return;
+    if (!this.stepsReported.has(testId)) {
+      this.reportSteps(test, testId);
+      this.stepsReported.add(testId);
+    }
     const testStatus =
       forcedStatus ??
       (skipped || test.pending
@@ -317,6 +391,7 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
    * CodeceptJS at runtime) and report each step to Orangebeard.
    */
   private reportSteps(test: any, testId: UUID): void {
+    if (this.realtimeSteps) return;
     const steps: any[] = test.steps ?? [];
 
     for (const step of steps) {
@@ -365,6 +440,46 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
     if (typeof time === 'number' && time > 0) return getTimeFromMs(time);
     if (time instanceof Date) return getTimeFromMs(time.getTime());
     return null;
+  }
+
+  private stripDataFromTitle(title: string | undefined): string {
+    if (!title) return '';
+    const idx = title.indexOf(' | {');
+    if (idx > -1) {
+      return title.slice(0, idx).trim();
+    }
+    return title;
+  }
+
+  private extractData(test: any): any | null {
+    const fromTitle = this.parseDataFromTitle(test?.title);
+    const candidates = [
+      test?.ctx?.current,
+      test?.current,
+      test?.ctx?.data,
+      test?.data,
+      test?.ctx?.test?.data,
+      test?.ctx?.test?.params,
+      test?.params,
+      test?.ctx?.currentTest?.ctx?.data,
+    ];
+    for (const c of candidates) {
+      if (c && typeof c === 'object') return c;
+    }
+    return fromTitle;
+  }
+
+  private parseDataFromTitle(title: string | undefined): any | null {
+    if (!title) return null;
+    const idx = title.indexOf(' | {');
+    if (idx === -1) return null;
+    const jsonPart = title.slice(idx + 3).trim();
+    const trimmed = jsonPart.endsWith('}') ? jsonPart : jsonPart.replace(/.*?({.*)/, '$1');
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return null;
+    }
   }
 
   // ── Logging & attachments ──────────────────────────────────────────
@@ -429,11 +544,11 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
   }
 
   // Attach any file path to the test (best-effort)
-  private async attachFileToTest(test: any, filePath: string, message: string): Promise<void> {
+  private async attachFileToTest(test: any, filePath: string, message: string): Promise<boolean> {
     const testId = this.resolveTestId(test);
-    if (!testId) return;
-    const resolved = path.resolve(filePath);
-    if (this.uploadedAttachments.has(resolved)) return;
+    if (!testId) return false;
+    const resolved = this.normalizePathKey(filePath);
+    if (this.uploadedAttachments.has(resolved)) return false;
 
     try {
       const content = await getBytes(filePath);
@@ -445,23 +560,30 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
       const logId = this.logMessage(testId, message, level.INFO);
       this.logAttachment(testId, logId, attachment);
       this.uploadedAttachments.add(resolved);
+      return true;
     } catch {
       // ignore if file missing/unreadable
+      return false;
     }
   }
 
-  private indexTestId(test: any, uuid: UUID): void {
-    const keys = [test?.id, test?.uuid, test?.title];
+  private normalizePathKey(p: string): string {
+    return path.resolve(p).replace(/\\/g, '/').toLowerCase();
+  }
+
+  private indexTestId(test: any, uuid: UUID, extraTitles: Array<string | undefined> = []): void {
+    const keys = [test?.id, test?.uuid, test?.title, ...extraTitles];
     for (const k of keys) {
-      if (typeof k === 'string' && k.trim()) this.testIdMap.set(k, uuid);
+      if (typeof k === 'string' && k.trim()) this.testIdMap.set(k.trim(), uuid);
     }
   }
 
   private resolveTestId(test: any): UUID | null {
     const current = this.getCurrentTestId();
     if (current) return current;
-
-    const keys = [test?.id, test?.uuid, test?.title];
+    const titleWithoutData = this.stripDataFromTitle(test?.title);
+    const { cleanTitle } = mergeAttributesFromEntityAndTitle({ ...test, title: titleWithoutData });
+    const keys = [test?.id, test?.uuid, test?.title, cleanTitle, titleWithoutData];
     for (const k of keys) {
       if (typeof k === 'string' && k.trim() && this.testIdMap.has(k)) {
         return this.testIdMap.get(k)!;
