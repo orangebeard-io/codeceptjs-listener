@@ -1,0 +1,50 @@
+{
+  "name": "@orangebeard-io/codeceptjs-listener",
+  "version": "1.0.0",
+  "description": "A CodeceptJS Mocha reporter for Orangebeard.io",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "clean": "rimraf dist",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build",
+    "get-version": "echo $npm_package_version",
+    "update-version": "release-it --ci --no-git --no-npm.publish",
+    "create-changelog": "auto-changelog --template changelog-template.hbs --starting-version v$npm_package_version"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/orangebeard-io/codeceptjs-listener.git"
+  },
+  "keywords": [
+    "orangebeard",
+    "codeceptjs",
+    "mocha reporter",
+    "test reporting"
+  ],
+  "author": "Orangebeard.io",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/orangebeard-io/codeceptjs-listener/issues"
+  },
+  "homepage": "https://github.com/orangebeard-io/codeceptjs-listener#readme",
+  "dependencies": {
+    "@js-joda/core": "^5.6.5",
+    "@orangebeard-io/javascript-client": "^2.0.8",
+    "mocha": "11.7.3"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^22.10.9",
+    "auto-changelog": "2.5.0",
+    "release-it": "^19.0.5",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.6.3"
+  }
+}

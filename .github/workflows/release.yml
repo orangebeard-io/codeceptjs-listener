@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - master
+
+permissions:
+  id-token: write
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Fetch all history to enable version bumping
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Update npm
+        run: npm install -g npm@latest
+      - run: npm ci
+
+      - name: Bump version
+        id: version_bump
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          # The output of npm version is the new version number, prefixed with 'v'
+          new_version=$(npm version patch -m "chore(release): 🚀 %s")
+          echo "new_version=$new_version" >> $GITHUB_OUTPUT
+
+      - name: Build
+        run: npm run build --if-present
+
+      - name: Publish package
+        run: npm publish
+
+      - name: Push changes
+        run: |
+          git push
+          git push --tags
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version_bump.outputs.new_version }}
+          generate_release_notes: true

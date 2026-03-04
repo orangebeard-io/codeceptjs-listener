@@ -1,0 +1,13 @@
+# dependencies
+node_modules/
+
+# ide
+.idea/
+
+.npmrc
+**/orangebeard.json
+.vscode
+*.tgz
+
+build/
+dist/
