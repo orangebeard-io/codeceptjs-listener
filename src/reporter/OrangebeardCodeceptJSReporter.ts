@@ -51,12 +51,20 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
   private finishedTests: Set<UUID> = new Set();
   private stepsReported: Set<UUID> = new Set();
   private stepMap: Map<any, UUID> = new Map();
+  private commentParentStep: Map<string, UUID> = new Map();
+  private commentParentStatus: Map<string, string> = new Map();
+  private hookParentStep: Map<string, UUID> = new Map();
+  private hookPhase: Map<string, 'Before' | 'After'> = new Map();
   private readonly realtimeSteps = true;
   private readonly logDataAsMarkdown = true;
   private iterationCounter: Map<string, number> = new Map();
 
   constructor(runner: Mocha.Runner, configuration: ReporterConfiguration) {
     super(runner, configuration as any);
+    // Keep Mocha's default Spec output so console reporting is not suppressed.
+    // This creates a sidecar Spec reporter alongside our Orangebeard reporting.
+    // eslint-disable-next-line no-new
+    new Mocha.reporters.Spec(runner);
 
     this.options = configuration?.reporterOptions ?? {};
 
@@ -93,6 +101,43 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
           );
         }
       }
+      if (this.realtimeSteps && step?.status === 'skipped' && !this.isCommentStep(step)) {
+        const obStep = this.stepMap.get(step);
+        const testId = this.getCurrentTestId() ?? this.resolveTestId(step?.test ?? step?.context?.test);
+        if (obStep && testId) {
+          this.updateCommentParentStatus(testId, status.SKIPPED);
+          const script = this.getExecuteScriptSource(step);
+          if (script) {
+            this.logMessage(testId, `Executed script:\n\`\`\`\n${script}\n\`\`\``, level.INFO, obStep, 'MARKDOWN');
+          }
+          if (this.isHttpRequestStep(step)) {
+            this.logHttpRequestContext(testId, obStep, this.getHttpRequestContext(step), level.INFO);
+          }
+          this.client.finishStep(obStep, {
+            testRunUUID: this.testRun!,
+            status: status.SKIPPED,
+            endTime: this.resolveStepTime(step.endTime) ?? getTime(),
+          } as any);
+          this.stepMap.delete(step);
+        }
+      }
+    });
+
+    // ── HOOK PARENTS (Before/After) ───────────────────────────────────
+    runner.on(Mocha.Runner.constants.EVENT_HOOK_BEGIN, (hook: Mocha.Hook) => {
+      const testId = this.getCurrentTestId() ?? this.resolveTestId(hook?.ctx?.currentTest ?? hook?.ctx?.test);
+      if (!testId) return;
+      const hookName = this.isAfterHook(hook) ? 'After' : 'Before';
+      this.hookPhase.set(String(testId), hookName);
+    });
+
+    runner.on(Mocha.Runner.constants.EVENT_HOOK_END, (hook: Mocha.Hook) => {
+      const testId = this.getCurrentTestId() ?? this.resolveTestId(hook?.ctx?.currentTest ?? hook?.ctx?.test);
+      if (!testId) return;
+      const hookErr = (hook as any)?.error ?? (hook as any)?.err;
+      const hookStatus = this.isRealError(hookErr) ? status.FAILED : status.PASSED;
+      this.closeHookParent(testId, hookStatus, hookErr);
+      this.hookPhase.delete(String(testId));
     });
     // Real-time step reporting
     codeceptEvent.dispatcher.on(codeceptEvent.step.started, (step: any) => {
@@ -100,20 +145,48 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
       const testId = this.getCurrentTestId() ?? this.resolveTestId(step?.test ?? step?.context?.test);
       if (!testId) return;
       const startTime = this.resolveStepTime(step.startTime) ?? getTime();
+      // If I.say: close previous parent, open new parent, and keep it open.
+      if (this.isCommentStep(step)) {
+        this.ensureHookParent(testId);
+        this.closeCommentParent(testId, status.PASSED);
+        const parentId = this.client.startStep({
+          testRunUUID: this.testRun!,
+          testUUID: testId,
+          stepName: this.getStepName(step),
+          startTime,
+          parentStepUUID: this.hookParentStep.get(String(testId)) ?? undefined,
+        } as any);
+        this.commentParentStep.set(String(testId), parentId);
+        this.commentParentStatus.set(String(testId), 'PENDING');
+        return;
+      }
+
+      this.ensureHookParent(testId);
+      const parentStepUUID = this.commentParentStep.get(String(testId)) ?? this.hookParentStep.get(String(testId)) ?? undefined;
       const obStep = this.client.startStep({
         testRunUUID: this.testRun!,
         testUUID: testId,
         stepName: this.getStepName(step),
         startTime,
+        parentStepUUID,
       } as any);
       this.stepMap.set(step, obStep);
     });
 
     codeceptEvent.dispatcher.on(codeceptEvent.step.passed, (step: any) => {
       if (!this.realtimeSteps) return;
+      if (this.isCommentStep(step)) return; // parent stays open
       const obStep = this.stepMap.get(step);
       const testId = this.getCurrentTestId() ?? this.resolveTestId(step?.test ?? step?.context?.test);
       if (!obStep || !testId) return;
+      this.updateCommentParentStatus(testId, status.PASSED);
+      const script = this.getExecuteScriptSource(step);
+      if (script) {
+        this.logMessage(testId, `Executed script:\n\`\`\`\n${script}\n\`\`\``, level.INFO, obStep, 'MARKDOWN');
+      }
+      if (this.isHttpRequestStep(step)) {
+        this.logHttpRequestContext(testId, obStep, this.getHttpRequestContext(step), level.INFO);
+      }
       this.client.finishStep(obStep, {
         testRunUUID: this.testRun!,
         status: status.PASSED,
@@ -124,15 +197,24 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
 
     codeceptEvent.dispatcher.on(codeceptEvent.step.failed, (step: any) => {
       if (!this.realtimeSteps) return;
+      if (this.isCommentStep(step)) return;
       const obStep = this.stepMap.get(step);
       const testId = this.getCurrentTestId() ?? this.resolveTestId(step?.test ?? step?.context?.test);
       if (testId && obStep) {
+        this.updateCommentParentStatus(testId, status.FAILED);
         const endTime = this.resolveStepTime(step.endTime) ?? getTime();
         const errorObj = step.err ?? step.error;
         if (errorObj) {
           for (const entry of buildErrorLogs(errorObj)) {
             this.logMessage(testId, entry.message, entry.level, obStep, entry.logFormat);
           }
+        }
+        const script = this.getExecuteScriptSource(step);
+        if (script) {
+          this.logMessage(testId, `Executed script:\n\`\`\`\n${script}\n\`\`\``, level.ERROR, obStep, 'MARKDOWN');
+        }
+        if (this.isHttpRequestStep(step)) {
+          this.logHttpRequestContext(testId, obStep, this.getHttpRequestContext(step), level.ERROR);
         }
         // If no errorObj, do not log a placeholder to avoid "[Error] undefined"
         this.client.finishStep(obStep, {
@@ -143,6 +225,8 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
         this.stepMap.delete(step);
       }
     });
+    // I.say support: CodeceptJS emits `comment` events; turn them into steps.
+    // No separate comment handler; handled via step events to preserve ordering.
 
     codeceptEvent.dispatcher.on(codeceptEvent.test.after, (test: any) => {
       const paths = new Set<string>();
@@ -176,6 +260,10 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
       this.finishedTests.clear();
       this.stepsReported.clear();
       this.stepMap.clear();
+      this.commentParentStep.clear();
+      this.commentParentStatus.clear();
+      this.hookParentStep.clear();
+      this.hookPhase.clear();
       this.testRun = this.client.startTestRun(
         getStartTestRun({
           testset: testset!,
@@ -217,6 +305,7 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
       if (testId) {
         this.reportSteps(test, testId);
         this.stepsReported.add(testId);
+        this.closeCommentParent(testId, status.PASSED);
       }
       this.finishTestItem(test, false);
     });
@@ -246,6 +335,7 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
 
           // 3. Finish test (screenshots handled in test.after)
           if (testId) this.finishTestItem(test, false, status.FAILED, testId);
+          if (testId) this.closeCommentParent(testId, status.FAILED);
         })(),
       );
     });
@@ -267,6 +357,9 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
       if (stackId && this.activeTests.length && this.activeTests[this.activeTests.length - 1].tempId === stackId) {
         this.activeTests.pop();
       }
+      // close comment parent if open
+      this.closeCommentParent(testId, finalStatus);
+      this.closeHookParent(testId, finalStatus);
     });
 
     // ── EVENT_TEST_PENDING ───────────────────────────────────────────
@@ -283,13 +376,61 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
     runner.on(Mocha.Runner.constants.EVENT_RUN_END, async () => {
       // Wait for any in-flight async work (screenshot reads, etc.)
       await this.awaitInflight();
-
+      // Close any dangling comment parents to avoid open steps in the run
+      for (const [testId] of Array.from(this.commentParentStep.entries())) {
+        this.closeCommentParent(testId);
+      }
+      for (const [testId] of Array.from(this.hookParentStep.entries())) {
+        this.closeHookParent(testId, status.PASSED);
+      }
       if (this.testRun) {
         await this.client.finishTestRun(this.testRun, {
           endTime: getTime(),
         } as any);
       }
     });
+  }
+
+  private closeHookParent(testId: UUID | string, parentStatus?: string, errorObj?: any): void {
+    const key = String(testId);
+    const p = this.hookParentStep.get(key);
+    if (!p) return;
+    const realErr = this.isRealError(errorObj);
+    if (realErr) {
+      for (const entry of buildErrorLogs(errorObj)) {
+        this.logMessage(testId as UUID, entry.message, entry.level, p, entry.logFormat);
+      }
+    }
+    const finalStatus = realErr ? parentStatus ?? status.FAILED : status.PASSED;
+    this.client.finishStep(p, {
+      testRunUUID: this.testRun!,
+      status: finalStatus,
+      endTime: getTime(),
+    } as any);
+    this.hookParentStep.delete(key);
+  }
+
+  private isAfterHook(hook: Mocha.Hook): boolean {
+    const title = (hook?.title ?? '').toLowerCase();
+    return title.includes('after');
+  }
+
+  private isRealError(err: any): boolean {
+    return err instanceof Error || (err && typeof err === 'object' && (err.message || err.stack));
+  }
+
+  private ensureHookParent(testId: UUID | string): void {
+    const key = String(testId);
+    if (this.hookParentStep.has(key)) return;
+    const phase = this.hookPhase.get(key);
+    if (!phase) return;
+    const parentId = this.client.startStep({
+      testRunUUID: this.testRun!,
+      testUUID: testId as UUID,
+      stepName: phase,
+      startTime: getTime(),
+    } as any);
+    this.hookParentStep.set(key, parentId);
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -415,6 +556,18 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
   }
 
   private getStepName(step: any): string {
+    // For executeScript we deliberately hide the script body from the title.
+    if (this.isExecuteScriptStep(step)) {
+      const actor = step.actor ?? 'I';
+      return `${actor} execute script`;
+    }
+    if (this.isHttpRequestStep(step)) {
+      const actor = step.actor ?? 'I';
+      const method = this.getHttpMethod(step);
+      const url = this.getHttpRequestUrl(step);
+      return `${actor} ${method} ${url ?? ''}`.trim();
+    }
+
     // Prefer CodeceptJS Step.toString() which gives e.g. 'I am on page "/"'
     if (typeof step.toString === 'function') {
       const str = step.toString();
@@ -425,6 +578,143 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
     const actor = step.actor ?? 'I';
     const name = typeof step.humanize === 'function' ? step.humanize() : step.name ?? 'step';
     return `${actor} ${name}`;
+  }
+
+  private isCommentStep(step: any): boolean {
+    const name = (step?.name ?? '').toString().toLowerCase();
+    const helper = (step?.helperMethod ?? '').toString().toLowerCase();
+    const humanized = this.getStepName(step).toLowerCase();
+    return name === 'say' || helper === 'say' || humanized.startsWith('i say');
+  }
+
+  private updateCommentParentStatus(testId: UUID | string, childStatus: string): void {
+    const key = String(testId);
+    const current = this.commentParentStatus.get(key) ?? 'PENDING';
+    let next = current;
+    if (childStatus === status.FAILED) {
+      next = status.FAILED;
+    } else if (childStatus === status.PASSED) {
+      if (current !== status.FAILED) next = status.PASSED;
+    } else if (childStatus === status.SKIPPED) {
+      if (current === 'PENDING') next = status.SKIPPED;
+    }
+    this.commentParentStatus.set(key, next);
+  }
+
+  private isExecuteScriptStep(step: any): boolean {
+    const helper = (step?.helperMethod ?? '').toString().toLowerCase();
+    const name = (step?.name ?? '').toString().toLowerCase();
+    const humanized =
+      typeof step?.humanize === 'function'
+        ? (step.humanize() ?? '').toString().toLowerCase()
+        : (step?.toString?.() ?? '').toString().toLowerCase();
+    return helper === 'executescript' || name === 'executescript' || humanized.startsWith('i execute script');
+  }
+
+  private getExecuteScriptSource(step: any): string | null {
+    if (!this.isExecuteScriptStep(step)) return null;
+    const arg = step?.args?.[0];
+    if (typeof arg === 'function') return arg.toString();
+    if (typeof arg === 'string') return arg;
+    try {
+      return arg ? JSON.stringify(arg, null, 2) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private isHttpRequestStep(step: any): boolean {
+    const helper = (step?.helperMethod ?? '').toString().toLowerCase();
+    const name = (step?.name ?? '').toString().toLowerCase();
+    const humanized =
+      typeof step?.humanize === 'function'
+        ? (step.humanize() ?? '').toString().toLowerCase()
+        : (step?.toString?.() ?? '').toString().toLowerCase();
+    const isSend = helper.startsWith('send') && helper.endsWith('request');
+    return (
+      isSend ||
+      name.endsWith('request') ||
+      humanized.startsWith('i send ') ||
+      humanized.startsWith('i patch ') ||
+      humanized.startsWith('i put ') ||
+      humanized.startsWith('i delete ')
+    );
+  }
+
+  private getHttpMethod(step: any): string {
+    const helper = (step?.helperMethod ?? '').toString().toLowerCase();
+    if (helper.includes('get')) return 'send get request';
+    if (helper.includes('post')) return 'send post request';
+    if (helper.includes('put')) return 'send put request';
+    if (helper.includes('patch')) return 'send patch request';
+    if (helper.includes('delete')) return 'send delete request';
+    if (helper.includes('head')) return 'send head request';
+    const name = (step?.name ?? '').toString().toLowerCase();
+    if (name) return name;
+    return 'send request';
+  }
+
+  private getHttpRequestUrl(step: any): string | null {
+    const url = step?.args?.[0];
+    return typeof url === 'string' ? `"${url}"` : null;
+  }
+
+  private getHttpRequestContext(step: any): { payload?: any; headers?: any } {
+    const payload = step?.args?.[1];
+    const headers = step?.args?.[2];
+    return { payload, headers };
+  }
+
+  private logHttpRequestContext(
+    testId: UUID,
+    stepId: UUID,
+    ctx: { payload?: any; headers?: any },
+    levelToUse: string,
+  ): void {
+    const parts: string[] = [];
+    if (typeof ctx.payload !== 'undefined') {
+      const bodyStr = this.stringifyForLog(ctx.payload);
+      parts.push(`Payload:\n\`\`\`\n${bodyStr}\n\`\`\``);
+    }
+    if (typeof ctx.headers !== 'undefined') {
+      const headersStr = this.stringifyForLog(ctx.headers);
+      parts.push(`Headers:\n\`\`\`\n${headersStr}\n\`\`\``);
+    }
+    if (parts.length === 0) return;
+    const message = parts.join('\n\n');
+    this.logMessage(testId, message, levelToUse, stepId, 'MARKDOWN');
+  }
+
+  private stringifyForLog(obj: any): string {
+    if (typeof obj === 'function') return obj.toString();
+    if (typeof obj === 'string') return obj;
+    try {
+      return JSON.stringify(obj, null, 2);
+    } catch {
+      return String(obj);
+    }
+  }
+
+  private closeCommentParent(testId: UUID | string, parentStatus?: string): void {
+    const key = String(testId);
+    const p = this.commentParentStep.get(key);
+    if (!p) return;
+    const aggregate = this.commentParentStatus.get(key);
+    const finalStatus =
+      aggregate === status.FAILED
+        ? status.FAILED
+        : aggregate === status.PASSED
+          ? status.PASSED
+          : aggregate === status.SKIPPED
+            ? status.SKIPPED
+            : parentStatus ?? status.PASSED;
+    this.client.finishStep(p, {
+      testRunUUID: this.testRun!,
+      status: finalStatus,
+      endTime: getTime(),
+    } as any);
+    this.commentParentStep.delete(key);
+    this.commentParentStatus.delete(key);
   }
 
   private resolveStepTime(time: any): string | null {
