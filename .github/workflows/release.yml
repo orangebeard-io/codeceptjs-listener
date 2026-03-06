@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     branches:
-      - master
+      - main
 
 permissions:
   id-token: write
@@ -40,7 +40,7 @@ jobs:
         run: npm run build --if-present
 
       - name: Publish package
-        run: npm publish
+        run: npm publish --access public
 
       - name: Push changes
         run: |

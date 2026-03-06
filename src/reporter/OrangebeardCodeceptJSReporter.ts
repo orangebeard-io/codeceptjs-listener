@@ -416,7 +416,7 @@ export default class OrangebeardCodeceptJSReporter extends Mocha.reporters.Base 
   }
 
   private isRealError(err: any): boolean {
-    return err instanceof Error || (err && typeof err === 'object' && (err.message || err.stack));
+    return Boolean(err instanceof Error || (err && typeof err === 'object' && (err.message || err.stack)));
   }
 
   private ensureHookParent(testId: UUID | string): void {
