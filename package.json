@@ -19,6 +19,12 @@
     "update-version": "release-it --ci --no-git --no-npm.publish",
     "create-changelog": "auto-changelog --template changelog-template.hbs --starting-version v$npm_package_version"
   },
+  "jest": {
+    "reporters": [
+      "default",
+      "@orangebeard-io/jest-listener"
+    ]
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/orangebeard-io/codeceptjs-listener.git"
@@ -43,6 +49,7 @@
   "devDependencies": {
     "@types/mocha": "^10.0.10",
     "@types/node": "^22.10.9",
+    "@orangebeard-io/jest-listener": "^2.0.3",
     "auto-changelog": "2.5.0",
     "cross-env": "^10.1.0",
     "jest": "^30.2.0",
