@@ -1,32 +1,43 @@
-# Orangebeard CodeceptJS Listener
+<h1 align="center">
+  <br>Orangebeard.io CodeceptJS Listener<br>
+</h1>
 
-A [CodeceptJS](https://codecept.io/) Mocha reporter that sends test results to [Orangebeard](https://orangebeard.io).
+<h4 align="center">Report <a href="https://codecept.io/" target="_blank" rel="noopener">CodeceptJS</a> test results to Orangebeard.</h4>
 
-## What gets reported
+<p align="center">
+  <a href="https://www.npmjs.com/package/@orangebeard-io/codeceptjs-listener">
+    <img src="https://img.shields.io/npm/v/@orangebeard-io/codeceptjs-listener.svg?style=flat-square"
+      alt="NPM Version" />
+  </a>
+  <a href="https://github.com/orangebeard-io/codeceptjs-listener/blob/master/LICENSE">
+    <img src="https://img.shields.io/github/license/orangebeard-io/codeceptjs-listener?style=flat-square"
+      alt="License" />
+  </a>
+</p>
 
-| CodeceptJS concept | Orangebeard entity |
-|---|---|
-| Feature | Suite |
-| Scenario | Test |
-| `I.*` steps | Steps (with actual execution times) |
-| BeforeSuite / AfterSuite | BEFORE / AFTER test items |
-| Tags (`@tag`) | Test attributes |
-| Failure screenshots | Attachments |
-| Error details | Log entries (with stack traces) |
+<div align="center">
+  <h4>
+    <a href="https://orangebeard.io">Orangebeard</a> |
+    <a href="#installation">Installation</a> |
+    <a href="#configuration">Configuration</a>
+  </h4>
+</div>
 
 ## Installation
 
-```bash
+### Install the npm package
+
+```shell
 npm install @orangebeard-io/codeceptjs-listener --save-dev
 ```
 
 ## Configuration
 
-### 1. Orangebeard connection (`orangebeard.json`)
+### 1. Orangebeard connection
 
-Create an `orangebeard.json` in your project root (or any parent directory):
+Create `orangebeard.json` in your project root (or any parent directory):
 
-```json
+```JSON
 {
   "endpoint": "https://your-instance.orangebeard.app",
   "token": "your-api-token",
@@ -34,21 +45,24 @@ Create an `orangebeard.json` in your project root (or any parent directory):
   "testset": "Your Test Set Name",
   "description": "CodeceptJS test run",
   "attributes": [
-    { "key": "env", "value": "ci" }
+    {
+      "key": "env",
+      "value": "ci"
+    }
   ]
 }
 ```
 
-Alternatively, use environment variables:
+You can also provide connection values with environment variables:
 
-| Variable | Description |
-|---|---|
-| `ORANGEBEARD_ENDPOINT` | Orangebeard instance URL |
-| `ORANGEBEARD_TOKEN` | API access token |
-| `ORANGEBEARD_PROJECT` | Project name |
-| `ORANGEBEARD_TESTSET` | Test set name |
+- `ORANGEBEARD_ENDPOINT`
+- `ORANGEBEARD_TOKEN`
+- `ORANGEBEARD_PROJECT`
+- `ORANGEBEARD_TESTSET`
 
-### 2. CodeceptJS reporter (`codecept.conf.js` / `codecept.conf.ts`)
+### 2. Configure the reporter in CodeceptJS
+
+Set the Mocha reporter in `codecept.conf.js` or `codecept.conf.ts`:
 
 ```js
 exports.config = {
@@ -66,13 +80,9 @@ exports.config = {
 };
 ```
 
-### Screenshots
+### 3. Screenshots (optional)
 
-The reporter automatically picks up failure screenshots created by CodeceptJS's
-built-in `screenshotOnFail` plugin and attaches them to the corresponding test
-in Orangebeard.
-
-Make sure the plugin is enabled (it is by default):
+The reporter attaches failure screenshots produced by CodeceptJS `screenshotOnFail`.
 
 ```js
 exports.config = {
@@ -85,15 +95,30 @@ exports.config = {
 };
 ```
 
-## Usage
+## Running
 
-Run your tests as usual:
+Run tests as usual:
 
-```bash
+```shell
 npx codeceptjs run
 ```
 
-Results will be reported to Orangebeard in real time.
+Results are streamed to Orangebeard in real time.
+
+## What gets reported
+
+The reporter will:
+
+- Map CodeceptJS Features to Orangebeard suites.
+- Map Scenarios to Orangebeard tests.
+- Report `I.*` actions as real-time steps.
+- Group hook activity under `Before` / `After` parent steps.
+- Group `I.say(...)` sections as parent comment steps.
+- Parse tags into Orangebeard test attributes.
+- Attach failure screenshots to the related test.
+- Send error details and stack traces as logs.
+- Log `I.executeScript(...)` source as markdown step logs.
+- For HTTP request steps (`sendGetRequest`, `sendPostRequest`, etc.), keep only URL in step titles and log payload/headers as markdown.
 
 ## License
 

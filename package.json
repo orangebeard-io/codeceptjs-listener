@@ -13,6 +13,7 @@
   "scripts": {
     "clean": "rimraf dist",
     "build": "npm run clean && tsc -p tsconfig.json",
+    "test": "cross-env ORANGEBEARD_TESTSET=\"CodeceptJS reporter unit test\" jest",
     "prepublishOnly": "npm run build",
     "get-version": "echo $npm_package_version",
     "update-version": "release-it --ci --no-git --no-npm.publish",
@@ -43,6 +44,8 @@
     "@types/mocha": "^10.0.10",
     "@types/node": "^22.10.9",
     "auto-changelog": "2.5.0",
+    "cross-env": "^10.1.0",
+    "jest": "^30.2.0",
     "release-it": "^19.0.5",
     "rimraf": "^6.0.1",
     "typescript": "^5.6.3"
